@@ -8,6 +8,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import JSZip from "jszip";
 
 type LayoutMode = "vertical" | "horizontal" | "grid" | "custom";
 type FitMode = "original" | "fit" | "fill" | "stretch" | "match-width" | "match-height";
@@ -67,6 +68,15 @@ interface MergeResult {
   format: ExportFormat;
   imageCount: number;
   totalPixels: number;
+}
+
+interface IndividualResult {
+  id: string;
+  fileName: string;
+  url: string;
+  blob: Blob;
+  width: number;
+  height: number;
 }
 
 interface PreviewState {
@@ -250,6 +260,13 @@ function isSupportedFile(file: File) {
   return SUPPORTED_EXT.test(file.name);
 }
 
+function sanitizeFileName(name: string, fallback: string) {
+  return name
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .trim()
+    .replace(/[. ]+$/g, "") || fallback;
+}
+
 export default function App() {
   const [started, setStarted] = useState(false);
   const [images, setImages] = useState<UploadedImage[]>([]);
@@ -260,6 +277,9 @@ export default function App() {
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [result, setResult] = useState<MergeResult | null>(null);
   const [isMerging, setIsMerging] = useState(false);
+  const [individualResults, setIndividualResults] = useState<IndividualResult[]>([]);
+  const [isExportingIndividually, setIsExportingIndividually] = useState(false);
+  const [isDownloadingZip, setIsDownloadingZip] = useState(false);
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
   const [isDraggingUpload, setIsDraggingUpload] = useState(false);
   const [resultViewer, setResultViewer] = useState<ResultViewerState>({
@@ -277,8 +297,9 @@ export default function App() {
   const imagesRef = useRef<UploadedImage[]>([]);
   const settingsRef = useRef<MergeSettings>(DEFAULT_SETTINGS);
   const resultRef = useRef<MergeResult | null>(null);
+  const individualResultsRef = useRef<IndividualResult[]>([]);
 
-  const canMerge = images.length >= 2 && !isMerging;
+  const canMerge = images.length >= 2 && !isMerging && !isExportingIndividually;
   const selectedLayer = useMemo(
     () => images.find((image) => image.id === selectedLayerId) ?? null,
     [images, selectedLayerId],
@@ -332,9 +353,14 @@ export default function App() {
   }, [result]);
 
   useEffect(() => {
+    individualResultsRef.current = individualResults;
+  }, [individualResults]);
+
+  useEffect(() => {
     return () => {
       imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url));
       if (resultRef.current?.url) URL.revokeObjectURL(resultRef.current.url);
+      individualResultsRef.current.forEach((item) => URL.revokeObjectURL(item.url));
     };
   }, []);
 
@@ -447,7 +473,9 @@ export default function App() {
 
   const resetResult = () => {
     if (result?.url) URL.revokeObjectURL(result.url);
+    individualResults.forEach((item) => URL.revokeObjectURL(item.url));
     setResult(null);
+    setIndividualResults([]);
     setResultViewer({ zoom: 1, fit: true, fullscreen: false });
   };
 
@@ -1073,13 +1101,171 @@ export default function App() {
 
   const downloadResult = () => {
     if (!result) return;
-    const safeName = settings.filename.trim() || "merged-image";
+    const safeName = sanitizeFileName(settings.filename, "merged-image");
     const link = document.createElement("a");
     link.href = result.url;
     link.download = `${safeName}.${extForFormat(result.format)}`;
     document.body.appendChild(link);
     link.click();
     link.remove();
+  };
+
+  const exportImagesIndividually = async () => {
+    if (images.length === 0 || isMerging || isExportingIndividually) return;
+
+    setIsExportingIndividually(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const results: IndividualResult[] = [];
+    const border = settings.borderEnabled ? settings.borderThickness : 0;
+
+    try {
+      for (const [index, image] of images.entries()) {
+        const bitmap = await createImageBitmap(image.file);
+        try {
+          const width = Math.max(1, Math.round(image.currentWidth * image.scale));
+          const height = Math.max(1, Math.round(image.currentHeight * image.scale));
+          const bounds = getRotatedBounds(0, 0, width, height, image.rotation);
+          const canvasWidth = Math.ceil(bounds.width) + border * 2;
+          const canvasHeight = Math.ceil(bounds.height) + border * 2;
+
+          if (
+            !Number.isFinite(canvasWidth) ||
+            !Number.isFinite(canvasHeight) ||
+            canvasWidth > MAX_CANVAS_EDGE ||
+            canvasHeight > MAX_CANVAS_EDGE ||
+            canvasWidth * canvasHeight > MAX_CANVAS_PIXELS
+          ) {
+            throw new Error("CANVAS_LIMIT");
+          }
+
+          const canvas = document.createElement("canvas");
+          canvas.width = canvasWidth;
+          canvas.height = canvasHeight;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) throw new Error("Canvas context unavailable");
+
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = "high";
+          if (effectiveBackground !== "transparent") {
+            ctx.fillStyle = effectiveBackground;
+            ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+          }
+
+          ctx.save();
+          ctx.translate(canvasWidth / 2, canvasHeight / 2);
+          ctx.rotate((image.rotation * Math.PI) / 180);
+
+          if (border > 0) {
+            ctx.fillStyle = settings.borderColor;
+            drawRoundedRectPath(
+              ctx,
+              -width / 2 - border,
+              -height / 2 - border,
+              width + border * 2,
+              height + border * 2,
+              settings.borderRadius,
+            );
+            ctx.fill();
+          }
+
+          if (settings.borderEnabled && settings.borderRadius > 0) {
+            drawRoundedRectPath(
+              ctx,
+              -width / 2,
+              -height / 2,
+              width,
+              height,
+              Math.max(0, settings.borderRadius - border / 2),
+            );
+            ctx.clip();
+          }
+
+          drawImageIntoRect(ctx, bitmap, -width / 2, -height / 2, width, height, settings.fit);
+          ctx.restore();
+
+          const blob = await new Promise<Blob>((resolve, reject) => {
+            canvas.toBlob(
+              (output) => {
+                if (!output) {
+                  reject(new Error(`Failed to export ${image.name}.`));
+                  return;
+                }
+                resolve(output);
+              },
+              mimeForFormat(settings.exportFormat),
+              settings.exportFormat === "png" ? undefined : settings.quality / 100,
+            );
+          });
+
+          const originalBaseName = image.name.replace(/\.[^.]+$/, "");
+          const safeBaseName = sanitizeFileName(originalBaseName, `image-${index + 1}`);
+          const sequence = String(index + 1).padStart(String(images.length).length, "0");
+          const fileName = `${sequence}-${safeBaseName}.${extForFormat(settings.exportFormat)}`;
+          results.push({
+            id: makeId(),
+            fileName,
+            url: URL.createObjectURL(blob),
+            blob,
+            width: canvasWidth,
+            height: canvasHeight,
+          });
+        } finally {
+          bitmap.close();
+        }
+      }
+
+      resetResult();
+      setIndividualResults(results);
+      addToast(`${results.length} individual image${results.length === 1 ? "" : "s"} ready to download.`, "success");
+    } catch (error) {
+      results.forEach((item) => URL.revokeObjectURL(item.url));
+      if (error instanceof Error && error.message === "CANVAS_LIMIT") {
+        addToast("One or more individual images exceed this browser's safe canvas size. Reduce their dimensions and try again.", "error");
+      } else {
+        addToast(
+          error instanceof Error ? `Unable to export images: ${error.message}` : "Unable to export images. Please try again.",
+          "error",
+        );
+      }
+    } finally {
+      setIsExportingIndividually(false);
+    }
+  };
+
+  const downloadIndividualResult = (item: IndividualResult) => {
+    const link = document.createElement("a");
+    link.href = item.url;
+    link.download = item.fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
+  const downloadIndividualResults = async () => {
+    if (individualResults.length === 0 || isDownloadingZip) return;
+
+    setIsDownloadingZip(true);
+    try {
+      const archive = new JSZip();
+      individualResults.forEach((item) => archive.file(item.fileName, item.blob));
+      const blob = await archive.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${sanitizeFileName(settings.filename, "images")}-individual-images.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      addToast(
+        error instanceof Error ? `Unable to create ZIP download: ${error.message}` : "Unable to create ZIP download.",
+        "error",
+      );
+    } finally {
+      setIsDownloadingZip(false);
+    }
   };
 
   const onUploadZoneKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -1111,7 +1297,7 @@ export default function App() {
                 Image Merger
               </h1>
               <p className="mx-auto mt-6 max-w-2xl text-[clamp(1rem,2.3vw,1.45rem)] italic text-zinc-300">
-                Combine multiple images into one beautiful output - instantly, privately, and effortlessly.
+                Merge images together or export them as separate files - instantly, privately, and effortlessly.
               </p>
               <button
                 type="button"
@@ -1134,7 +1320,9 @@ export default function App() {
                 <h1 className="bg-gradient-to-b from-white via-zinc-200 to-zinc-500 bg-clip-text text-4xl font-bold tracking-tight text-transparent md:text-6xl">
                   Image Merger
                 </h1>
-                <p className="mt-3 text-zinc-300 md:text-lg">Upload, arrange, merge, preview, and export your images.</p>
+                <p className="mt-3 text-zinc-300 md:text-lg">
+                  Upload, arrange, merge images together, or export each image separately.
+                </p>
                 <p className="mt-2 text-sm text-zinc-400">
                   Private by design - your images are processed locally in your browser whenever possible.
                 </p>
@@ -1894,6 +2082,21 @@ export default function App() {
                     )}
                   </span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => void exportImagesIndividually()}
+                  disabled={images.length === 0 || isMerging || isExportingIndividually}
+                  className={`mt-3 w-full rounded-xl border px-6 py-3 text-lg font-semibold transition ${
+                    images.length > 0 && !isMerging && !isExportingIndividually
+                      ? "border-violet-300/60 bg-violet-400/10 text-white hover:border-violet-200 hover:bg-violet-400/20"
+                      : "cursor-not-allowed border-white/10 text-zinc-400 opacity-50"
+                  }`}
+                >
+                  {isExportingIndividually
+                    ? "Creating individual image files..."
+                    : `Export ${images.length || ""} Image${images.length === 1 ? "" : "s"} Separately`}
+                </button>
               </section>
 
               {result && (
@@ -1974,6 +2177,62 @@ export default function App() {
                     >
                       Start New Merge
                     </button>
+                  </div>
+                </section>
+              )}
+
+              {individualResults.length > 0 && (
+                <section className="glass mt-10 rounded-3xl border border-white/10 p-4 md:p-6">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-2xl font-semibold">Individual Image Pages</h2>
+                      <p className="mt-1 text-sm text-zinc-300">
+                        {individualResults.length} separate files. Scroll through each numbered page or download them together.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void downloadIndividualResults()}
+                      disabled={isDownloadingZip}
+                      className="rounded-xl border border-violet-300/60 bg-violet-400/10 px-5 py-2.5 font-semibold text-white transition hover:bg-violet-400/20 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {isDownloadingZip ? "Preparing ZIP..." : "Download All as ZIP"}
+                    </button>
+                  </div>
+
+                  <div className="mt-5 max-h-[75vh] space-y-4 overflow-y-auto rounded-2xl border border-white/10 bg-black/35 p-3">
+                    {individualResults.map((item, index) => (
+                      <article
+                        key={item.id}
+                        aria-label={`Page ${index + 1} of ${individualResults.length}`}
+                        className="rounded-xl border border-white/10 bg-black/40 p-4"
+                      >
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <h3 className="font-semibold">
+                              Page {index + 1} of {individualResults.length}
+                            </h3>
+                            <p className="break-all text-sm text-zinc-300">{item.fileName}</p>
+                            <p className="text-xs text-zinc-400">
+                              {item.width} x {item.height}px · {formatBytes(item.blob.size)}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => downloadIndividualResult(item)}
+                            className="rounded-lg border border-cyan-300/50 px-3 py-2 text-sm font-semibold text-zinc-100 transition hover:bg-cyan-400/10"
+                          >
+                            Download This Image
+                          </button>
+                        </div>
+                        <img
+                          src={item.url}
+                          alt={`Preview of ${item.fileName}, page ${index + 1}`}
+                          loading="lazy"
+                          className="mx-auto max-h-[55vh] max-w-full rounded-lg object-contain"
+                        />
+                      </article>
+                    ))}
                   </div>
                 </section>
               )}
