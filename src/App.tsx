@@ -8,7 +8,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import JSZip from "jszip";
+import { jsPDF } from "jspdf";
 
 type LayoutMode = "vertical" | "horizontal" | "grid" | "custom";
 type FitMode = "original" | "fit" | "fill" | "stretch" | "match-width" | "match-height";
@@ -70,14 +70,28 @@ interface MergeResult {
   totalPixels: number;
 }
 
-interface IndividualResult {
+interface PdfPagePreview {
   id: string;
-  fileName: string;
+  name: string;
   url: string;
   blob: Blob;
   width: number;
   height: number;
 }
+
+interface SaveFilePickerHandle {
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>;
+    close: () => Promise<void>;
+  }>;
+}
+
+type SaveFilePickerWindow = Window & {
+  showSaveFilePicker?: (options: {
+    suggestedName: string;
+    types: Array<{ description: string; accept: Record<string, string[]> }>;
+  }) => Promise<SaveFilePickerHandle>;
+};
 
 interface PreviewState {
   imageId: string;
@@ -277,9 +291,9 @@ export default function App() {
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [result, setResult] = useState<MergeResult | null>(null);
   const [isMerging, setIsMerging] = useState(false);
-  const [individualResults, setIndividualResults] = useState<IndividualResult[]>([]);
-  const [isExportingIndividually, setIsExportingIndividually] = useState(false);
-  const [isDownloadingZip, setIsDownloadingZip] = useState(false);
+  const [pdfPages, setPdfPages] = useState<PdfPagePreview[]>([]);
+  const [pdfBlob, setPdfBlob] = useState<Blob | null>(null);
+  const [isCreatingPdf, setIsCreatingPdf] = useState(false);
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
   const [isDraggingUpload, setIsDraggingUpload] = useState(false);
   const [resultViewer, setResultViewer] = useState<ResultViewerState>({
@@ -297,9 +311,9 @@ export default function App() {
   const imagesRef = useRef<UploadedImage[]>([]);
   const settingsRef = useRef<MergeSettings>(DEFAULT_SETTINGS);
   const resultRef = useRef<MergeResult | null>(null);
-  const individualResultsRef = useRef<IndividualResult[]>([]);
+  const pdfPagesRef = useRef<PdfPagePreview[]>([]);
 
-  const canMerge = images.length >= 2 && !isMerging && !isExportingIndividually;
+  const canMerge = images.length >= 2 && !isMerging && !isCreatingPdf;
   const selectedLayer = useMemo(
     () => images.find((image) => image.id === selectedLayerId) ?? null,
     [images, selectedLayerId],
@@ -353,14 +367,14 @@ export default function App() {
   }, [result]);
 
   useEffect(() => {
-    individualResultsRef.current = individualResults;
-  }, [individualResults]);
+    pdfPagesRef.current = pdfPages;
+  }, [pdfPages]);
 
   useEffect(() => {
     return () => {
       imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url));
       if (resultRef.current?.url) URL.revokeObjectURL(resultRef.current.url);
-      individualResultsRef.current.forEach((item) => URL.revokeObjectURL(item.url));
+      pdfPagesRef.current.forEach((item) => URL.revokeObjectURL(item.url));
     };
   }, []);
 
@@ -473,9 +487,10 @@ export default function App() {
 
   const resetResult = () => {
     if (result?.url) URL.revokeObjectURL(result.url);
-    individualResults.forEach((item) => URL.revokeObjectURL(item.url));
+    pdfPages.forEach((item) => URL.revokeObjectURL(item.url));
     setResult(null);
-    setIndividualResults([]);
+    setPdfPages([]);
+    setPdfBlob(null);
     setResultViewer({ zoom: 1, fit: true, fullscreen: false });
   };
 
@@ -1099,28 +1114,58 @@ export default function App() {
     }
   };
 
+  const saveFile = async (blob: Blob, fileName: string, mimeType: string, extension: string, description: string) => {
+    const pickerWindow = window as SaveFilePickerWindow;
+    if (!pickerWindow.showSaveFilePicker) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      addToast("Download started. Choose a save location in your browser's download settings.", "info");
+      return;
+    }
+
+    try {
+      const handle = await pickerWindow.showSaveFilePicker({
+        suggestedName: fileName,
+        types: [{ description, accept: { [mimeType]: [extension] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      addToast(`${description} saved successfully.`, "success");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      addToast(
+        error instanceof Error ? `Unable to save ${description.toLowerCase()}: ${error.message}` : `Unable to save ${description.toLowerCase()}.`,
+        "error",
+      );
+    }
+  };
+
   const downloadResult = () => {
     if (!result) return;
     const safeName = sanitizeFileName(settings.filename, "merged-image");
-    const link = document.createElement("a");
-    link.href = result.url;
-    link.download = `${safeName}.${extForFormat(result.format)}`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+    const extension = extForFormat(result.format);
+    void saveFile(result.blob, `${safeName}.${extension}`, mimeForFormat(result.format), `.${extension}`, "Image");
   };
 
-  const exportImagesIndividually = async () => {
-    if (images.length === 0 || isMerging || isExportingIndividually) return;
+  const createMultipagePdf = async () => {
+    if (images.length === 0 || isMerging || isCreatingPdf) return;
 
-    setIsExportingIndividually(true);
+    setIsCreatingPdf(true);
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
-    const results: IndividualResult[] = [];
+    const pages: PdfPagePreview[] = [];
     const border = settings.borderEnabled ? settings.borderThickness : 0;
+    const pageMime = settings.exportFormat === "jpeg" ? "image/jpeg" : "image/png";
 
     try {
-      for (const [index, image] of images.entries()) {
+      for (const image of images) {
         const bitmap = await createImageBitmap(image.file);
         try {
           const width = Math.max(1, Math.round(image.currentWidth * image.scale));
@@ -1188,23 +1233,19 @@ export default function App() {
             canvas.toBlob(
               (output) => {
                 if (!output) {
-                  reject(new Error(`Failed to export ${image.name}.`));
+                  reject(new Error(`Failed to render PDF page for ${image.name}.`));
                   return;
                 }
                 resolve(output);
               },
-              mimeForFormat(settings.exportFormat),
-              settings.exportFormat === "png" ? undefined : settings.quality / 100,
+              pageMime,
+              pageMime === "image/jpeg" ? settings.quality / 100 : undefined,
             );
           });
 
-          const originalBaseName = image.name.replace(/\.[^.]+$/, "");
-          const safeBaseName = sanitizeFileName(originalBaseName, `image-${index + 1}`);
-          const sequence = String(index + 1).padStart(String(images.length).length, "0");
-          const fileName = `${sequence}-${safeBaseName}.${extForFormat(settings.exportFormat)}`;
-          results.push({
+          pages.push({
             id: makeId(),
-            fileName,
+            name: image.name,
             url: URL.createObjectURL(blob),
             blob,
             width: canvasWidth,
@@ -1215,57 +1256,59 @@ export default function App() {
         }
       }
 
+      const maxPdfPageEdge = 14400;
+      const getPageSize = (page: PdfPagePreview) => {
+        const scale = Math.min(1, maxPdfPageEdge / page.width, maxPdfPageEdge / page.height);
+        return [page.width * scale, page.height * scale] as const;
+      };
+      const [firstWidth, firstHeight] = getPageSize(pages[0]);
+      const pdf = new jsPDF({
+        unit: "pt",
+        format: [firstWidth, firstHeight],
+        compress: true,
+      });
+
+      for (const [index, page] of pages.entries()) {
+        const [pageWidth, pageHeight] = getPageSize(page);
+        if (index > 0) {
+          pdf.addPage([pageWidth, pageHeight], pageWidth > pageHeight ? "landscape" : "portrait");
+        }
+
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (typeof reader.result === "string") resolve(reader.result);
+            else reject(new Error(`Failed to read PDF page for ${page.name}.`));
+          };
+          reader.onerror = () => reject(reader.error ?? new Error(`Failed to read PDF page for ${page.name}.`));
+          reader.readAsDataURL(page.blob);
+        });
+
+        pdf.addImage(dataUrl, pageMime === "image/jpeg" ? "JPEG" : "PNG", 0, 0, pageWidth, pageHeight, undefined, "FAST");
+      }
+
+      const blob = pdf.output("blob");
       resetResult();
-      setIndividualResults(results);
-      addToast(`${results.length} individual image${results.length === 1 ? "" : "s"} ready to download.`, "success");
+      setPdfPages(pages);
+      setPdfBlob(blob);
+      addToast(`Created one PDF with ${pages.length} page${pages.length === 1 ? "" : "s"}.`, "success");
     } catch (error) {
-      results.forEach((item) => URL.revokeObjectURL(item.url));
+      pages.forEach((page) => URL.revokeObjectURL(page.url));
       if (error instanceof Error && error.message === "CANVAS_LIMIT") {
-        addToast("One or more individual images exceed this browser's safe canvas size. Reduce their dimensions and try again.", "error");
+        addToast("One or more images exceed this browser's safe canvas size. Reduce their dimensions and try again.", "error");
       } else {
-        addToast(
-          error instanceof Error ? `Unable to export images: ${error.message}` : "Unable to export images. Please try again.",
-          "error",
-        );
+        addToast(error instanceof Error ? `Unable to create PDF: ${error.message}` : "Unable to create PDF.", "error");
       }
     } finally {
-      setIsExportingIndividually(false);
+      setIsCreatingPdf(false);
     }
   };
 
-  const downloadIndividualResult = (item: IndividualResult) => {
-    const link = document.createElement("a");
-    link.href = item.url;
-    link.download = item.fileName;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  };
+  const saveMultipagePdf = async () => {
+    if (!pdfBlob) return;
 
-  const downloadIndividualResults = async () => {
-    if (individualResults.length === 0 || isDownloadingZip) return;
-
-    setIsDownloadingZip(true);
-    try {
-      const archive = new JSZip();
-      individualResults.forEach((item) => archive.file(item.fileName, item.blob));
-      const blob = await archive.generateAsync({ type: "blob" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${sanitizeFileName(settings.filename, "images")}-individual-images.zip`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) {
-      addToast(
-        error instanceof Error ? `Unable to create ZIP download: ${error.message}` : "Unable to create ZIP download.",
-        "error",
-      );
-    } finally {
-      setIsDownloadingZip(false);
-    }
+    const fileName = `${sanitizeFileName(settings.filename, "images")}.pdf`;
+    await saveFile(pdfBlob, fileName, "application/pdf", ".pdf", "PDF document");
   };
 
   const onUploadZoneKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -1297,7 +1340,7 @@ export default function App() {
                 Image Merger
               </h1>
               <p className="mx-auto mt-6 max-w-2xl text-[clamp(1rem,2.3vw,1.45rem)] italic text-zinc-300">
-                Merge images together or export them as separate files - instantly, privately, and effortlessly.
+                Combine images into one picture or put each image on its own page in a single PDF.
               </p>
               <button
                 type="button"
@@ -1321,7 +1364,7 @@ export default function App() {
                   Image Merger
                 </h1>
                 <p className="mt-3 text-zinc-300 md:text-lg">
-                  Upload, arrange, merge images together, or export each image separately.
+                  Merge images into one picture or create one multi-page PDF with a different image on each page.
                 </p>
                 <p className="mt-2 text-sm text-zinc-400">
                   Private by design - your images are processed locally in your browser whenever possible.
@@ -1364,7 +1407,9 @@ export default function App() {
                     <span className="absolute inset-[1px] rounded-[11px] bg-black/70" />
                     <span className="relative">Upload Images</span>
                   </button>
-                  <p className="mt-6 text-xs uppercase tracking-[0.2em] text-zinc-400">Supports JPG, JPEG, PNG, WEBP</p>
+                  <p className="mt-6 text-xs uppercase tracking-[0.2em] text-zinc-400">
+                    Supports JPG, JPEG, PNG, WEBP · Files stay on your device
+                  </p>
                 </div>
                 <input
                   ref={uploadInputRef}
@@ -2085,17 +2130,15 @@ export default function App() {
 
                 <button
                   type="button"
-                  onClick={() => void exportImagesIndividually()}
-                  disabled={images.length === 0 || isMerging || isExportingIndividually}
+                  onClick={() => void createMultipagePdf()}
+                  disabled={images.length === 0 || isMerging || isCreatingPdf}
                   className={`mt-3 w-full rounded-xl border px-6 py-3 text-lg font-semibold transition ${
-                    images.length > 0 && !isMerging && !isExportingIndividually
+                    images.length > 0 && !isMerging && !isCreatingPdf
                       ? "border-violet-300/60 bg-violet-400/10 text-white hover:border-violet-200 hover:bg-violet-400/20"
                       : "cursor-not-allowed border-white/10 text-zinc-400 opacity-50"
                   }`}
                 >
-                  {isExportingIndividually
-                    ? "Creating individual image files..."
-                    : `Export ${images.length || ""} Image${images.length === 1 ? "" : "s"} Separately`}
+                  {isCreatingPdf ? "Creating multi-page PDF..." : "Create Multi-page PDF"}
                 </button>
               </section>
 
@@ -2168,7 +2211,7 @@ export default function App() {
                       onClick={downloadResult}
                       className="rounded-xl border border-cyan-300/60 bg-cyan-400/10 px-5 py-2.5 font-semibold text-white transition hover:scale-[1.01] hover:shadow-[0_0_24px_rgba(34,211,238,0.35)]"
                     >
-                      Download Merged Image
+                      Save Merged Image...
                     </button>
                     <button
                       type="button"
@@ -2181,53 +2224,45 @@ export default function App() {
                 </section>
               )}
 
-              {individualResults.length > 0 && (
+              {pdfPages.length > 0 && pdfBlob && (
                 <section className="glass mt-10 rounded-3xl border border-white/10 p-4 md:p-6">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <h2 className="text-2xl font-semibold">Individual Image Pages</h2>
+                      <h2 className="text-2xl font-semibold">Multi-page PDF Preview</h2>
                       <p className="mt-1 text-sm text-zinc-300">
-                        {individualResults.length} separate files. Scroll through each numbered page or download them together.
+                        One PDF with {pdfPages.length} page{pdfPages.length === 1 ? "" : "s"}, in the same order as your uploaded images.
                       </p>
                     </div>
                     <button
                       type="button"
-                      onClick={() => void downloadIndividualResults()}
-                      disabled={isDownloadingZip}
+                      onClick={() => void saveMultipagePdf()}
                       className="rounded-xl border border-violet-300/60 bg-violet-400/10 px-5 py-2.5 font-semibold text-white transition hover:bg-violet-400/20 disabled:cursor-wait disabled:opacity-60"
                     >
-                      {isDownloadingZip ? "Preparing ZIP..." : "Download All as ZIP"}
+                      Save PDF...
                     </button>
                   </div>
 
                   <div className="mt-5 max-h-[75vh] space-y-4 overflow-y-auto rounded-2xl border border-white/10 bg-black/35 p-3">
-                    {individualResults.map((item, index) => (
+                    {pdfPages.map((item, index) => (
                       <article
                         key={item.id}
-                        aria-label={`Page ${index + 1} of ${individualResults.length}`}
+                        aria-label={`Page ${index + 1} of ${pdfPages.length}`}
                         className="rounded-xl border border-white/10 bg-black/40 p-4"
                       >
                         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                           <div>
                             <h3 className="font-semibold">
-                              Page {index + 1} of {individualResults.length}
+                              Page {index + 1} of {pdfPages.length}
                             </h3>
-                            <p className="break-all text-sm text-zinc-300">{item.fileName}</p>
+                            <p className="break-all text-sm text-zinc-300">{item.name}</p>
                             <p className="text-xs text-zinc-400">
-                              {item.width} x {item.height}px · {formatBytes(item.blob.size)}
+                              {item.width} x {item.height}px
                             </p>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => downloadIndividualResult(item)}
-                            className="rounded-lg border border-cyan-300/50 px-3 py-2 text-sm font-semibold text-zinc-100 transition hover:bg-cyan-400/10"
-                          >
-                            Download This Image
-                          </button>
                         </div>
                         <img
                           src={item.url}
-                          alt={`Preview of ${item.fileName}, page ${index + 1}`}
+                          alt={`PDF page ${index + 1}: ${item.name}`}
                           loading="lazy"
                           className="mx-auto max-h-[55vh] max-w-full rounded-lg object-contain"
                         />
