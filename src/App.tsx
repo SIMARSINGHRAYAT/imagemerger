@@ -1342,24 +1342,44 @@ export default function App() {
               <p className="mx-auto mt-6 max-w-2xl text-[clamp(1rem,2.3vw,1.45rem)] italic text-zinc-300">
                 Combine images into one picture or put each image on its own page in a single PDF.
               </p>
-              <button
-                type="button"
-                onClick={() => setStarted(true)}
-                className="group relative mt-11 inline-flex items-center gap-2 rounded-2xl border border-white/20 bg-white/5 px-8 py-4 text-lg font-semibold text-white backdrop-blur-xl transition duration-200 hover:scale-[1.03] hover:shadow-[0_0_35px_rgba(56,189,248,0.5)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400"
-              >
-                <span className="absolute inset-0 rounded-2xl bg-[conic-gradient(from_160deg,#38bdf8,#a855f7,#fb923c,#facc15,#0ea5e9,#22d3ee,#a855f7)] opacity-80 blur-sm transition duration-200 group-hover:opacity-100" />
-                <span className="absolute inset-[1px] rounded-2xl bg-[#090909de] backdrop-blur-xl" />
-                <span className="relative">Get Started</span>
-                <span className="relative transition-transform duration-200 group-hover:translate-x-1" aria-hidden="true">
-                  &rarr;
-                </span>
-              </button>
+              <div className="mt-11 flex flex-col items-center justify-center gap-4 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStarted(true);
+                    setShowPrivacyPolicy(false);
+                  }}
+                  className="group relative inline-flex items-center gap-2 rounded-2xl border border-white/20 bg-white/5 px-8 py-4 text-lg font-semibold text-white backdrop-blur-xl transition duration-200 hover:scale-[1.03] hover:shadow-[0_0_35px_rgba(56,189,248,0.5)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400"
+                >
+                  <span className="absolute inset-0 rounded-2xl bg-[conic-gradient(from_160deg,#38bdf8,#a855f7,#fb923c,#facc15,#0ea5e9,#22d3ee,#a855f7)] opacity-80 blur-sm transition duration-200 group-hover:opacity-100" />
+                  <span className="absolute inset-[1px] rounded-2xl bg-[#090909de] backdrop-blur-xl" />
+                  <span className="relative">Get Started</span>
+                  <span className="relative transition-transform duration-200 group-hover:translate-x-1" aria-hidden="true">
+                    &rarr;
+                  </span>
+                </button>
+
+                <a
+                  href="./privacy-policy/"
+                  className="inline-flex items-center justify-center rounded-2xl border border-white/15 bg-black/20 px-6 py-4 text-base font-medium text-zinc-100 transition hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-100"
+                >
+                  Privacy Policy
+                </a>
+              </div>
             </div>
           </section>
         ) : (
           <main className="animate-enter pb-20 pt-10 md:pt-14">
             <div className="mx-auto w-[min(1160px,88vw)]">
               <header className="text-center">
+                <div className="mb-4 flex justify-center">
+                  <a
+                    href="./privacy-policy/"
+                    className="inline-flex items-center rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium uppercase tracking-[0.2em] text-zinc-200 transition hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-100"
+                  >
+                    Privacy Policy
+                  </a>
+                </div>
                 <h1 className="bg-gradient-to-b from-white via-zinc-200 to-zinc-500 bg-clip-text text-4xl font-bold tracking-tight text-transparent md:text-6xl">
                   Image Merger
                 </h1>
