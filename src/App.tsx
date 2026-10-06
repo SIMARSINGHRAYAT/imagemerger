@@ -1358,13 +1358,6 @@ export default function App() {
                     &rarr;
                   </span>
                 </button>
-
-                <a
-                  href="./privacy-policy/"
-                  className="inline-flex items-center justify-center rounded-2xl border border-white/15 bg-black/20 px-6 py-4 text-base font-medium text-zinc-100 transition hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-100"
-                >
-                  Privacy Policy
-                </a>
               </div>
             </div>
           </section>
@@ -1372,14 +1365,6 @@ export default function App() {
           <main className="animate-enter pb-20 pt-10 md:pt-14">
             <div className="mx-auto w-[min(1160px,88vw)]">
               <header className="text-center">
-                <div className="mb-4 flex justify-center">
-                  <a
-                    href="./privacy-policy/"
-                    className="inline-flex items-center rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium uppercase tracking-[0.2em] text-zinc-200 transition hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-100"
-                  >
-                    Privacy Policy
-                  </a>
-                </div>
                 <h1 className="bg-gradient-to-b from-white via-zinc-200 to-zinc-500 bg-clip-text text-4xl font-bold tracking-tight text-transparent md:text-6xl">
                   Image Merger
                 </h1>
